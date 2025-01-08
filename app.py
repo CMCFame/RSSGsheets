@@ -9,7 +9,7 @@ import json
 import hashlib
 import re
 
-# Configuración de la página de Streamlit
+# Configuración de la página
 st.set_page_config(
     page_title="RSS Gaming News Collector",
     page_icon="🎮",
@@ -73,13 +73,30 @@ def extract_url(link):
         return link.get('href', '#')
     return '#'
 
-def get_sheet_service(credentials):
+def get_sheet_service():
     """Initialize Google Sheets API service"""
-    creds = Credentials.from_service_account_info(
-        credentials,
-        scopes=['https://www.googleapis.com/auth/spreadsheets']
-    )
-    return build('sheets', 'v4', credentials=creds)
+    try:
+        credentials = {
+            "type": "service_account",
+            "project_id": st.secrets["project_id"],
+            "private_key_id": st.secrets["private_key_id"],
+            "private_key": st.secrets["private_key"],
+            "client_email": st.secrets["client_email"],
+            "client_id": st.secrets["client_id"],
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+            "client_x509_cert_url": st.secrets["client_x509_cert_url"]
+        }
+        
+        creds = Credentials.from_service_account_info(
+            credentials,
+            scopes=['https://www.googleapis.com/auth/spreadsheets']
+        )
+        return build('sheets', 'v4', credentials=creds)
+    except Exception as e:
+        st.error(f"Error al configurar el servicio: {str(e)}")
+        return None
 
 def create_headers(service, spreadsheet_id):
     """Create headers if they don't exist"""
@@ -109,8 +126,6 @@ st.title('🎮 RSS Gaming News Collector')
 # Sidebar para configuración
 st.sidebar.header('Configuración')
 
-# File uploader para las credenciales
-uploaded_file = st.sidebar.file_uploader("Subir archivo credentials.json", type=['json'])
 spreadsheet_id = st.sidebar.text_input('ID de Google Spreadsheet', '1yIKuqRs9KlqMdqhPEbTpfoIwMNSWaNomRVUuFOsrokU')
 
 # Selección de fuentes
@@ -120,96 +135,87 @@ for source, url in GAMING_FEEDS.items():
     if st.sidebar.checkbox(source, value=True):
         selected_feeds[source] = url
 
-if uploaded_file is not None:
-    credentials = json.load(uploaded_file)
-    
-    if st.button('Recolectar Noticias'):
-        try:
-            service = get_sheet_service(credentials)
-            
-            # Verificar acceso y crear headers
-            if not create_headers(service, spreadsheet_id):
-                st.error('Error al acceder a la hoja de cálculo. Verifica el ID y los permisos.')
-                st.stop()
-            
-            # Crear barra de progreso
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            # Inicializar cache
-            cache = URLCache()
-            total_new_entries = 0
-            total_feeds = len(selected_feeds)
-            
-            for idx, (source, feed_url) in enumerate(selected_feeds.items()):
-                status_text.text(f"Procesando {source}...")
-                try:
-                    feed = feedparser.parse(feed_url)
-                    
-                    for entry in feed.entries:
-                        link = extract_url(entry.get('link', '#'))
-                        if '?' in link:
-                            link = link.split('?')[0]
-                        
-                        if cache.is_new_url(link, source):
-                            summary = clean_html(entry.get('summary', ''))
-                            if len(summary) > 300:
-                                summary = summary[:297] + "..."
-                            
-                            values = [[
-                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                                source,
-                                entry.get('title', 'Sin título'),
-                                link,
-                                summary
-                            ]]
-                            
-                            service.spreadsheets().values().append(
-                                spreadsheetId=spreadsheet_id,
-                                range='Noticias!A:E',
-                                valueInputOption='RAW',
-                                insertDataOption='INSERT_ROWS',
-                                body={'values': values}
-                            ).execute()
-                            
-                            total_new_entries += 1
-                            
-                            # Pequeña pausa
-                            time.sleep(0.5)
-                    
-                except Exception as e:
-                    st.warning(f"Error procesando {source}: {str(e)}")
+if st.button('Recolectar Noticias'):
+    try:
+        service = get_sheet_service()
+        if service is None:
+            st.error('Error al inicializar el servicio de Google Sheets')
+            st.stop()
+        
+        # Verificar acceso y crear headers
+        if not create_headers(service, spreadsheet_id):
+            st.error('Error al acceder a la hoja de cálculo. Verifica el ID y los permisos.')
+            st.stop()
+        
+        # Crear barra de progreso
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        # Inicializar cache
+        cache = URLCache()
+        total_new_entries = 0
+        total_feeds = len(selected_feeds)
+        
+        for idx, (source, feed_url) in enumerate(selected_feeds.items()):
+            status_text.text(f"Procesando {source}...")
+            try:
+                feed = feedparser.parse(feed_url)
                 
-                # Actualizar barra de progreso
-                progress_bar.progress((idx + 1) / total_feeds)
+                for entry in feed.entries:
+                    link = extract_url(entry.get('link', '#'))
+                    if '?' in link:
+                        link = link.split('?')[0]
+                    
+                    if cache.is_new_url(link, source):
+                        summary = clean_html(entry.get('summary', ''))
+                        if len(summary) > 300:
+                            summary = summary[:297] + "..."
+                        
+                        values = [[
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            source,
+                            entry.get('title', 'Sin título'),
+                            link,
+                            summary
+                        ]]
+                        
+                        service.spreadsheets().values().append(
+                            spreadsheetId=spreadsheet_id,
+                            range='Noticias!A:E',
+                            valueInputOption='RAW',
+                            insertDataOption='INSERT_ROWS',
+                            body={'values': values}
+                        ).execute()
+                        
+                        total_new_entries += 1
+                        
+                        # Pequeña pausa
+                        time.sleep(0.5)
+                
+            except Exception as e:
+                st.warning(f"Error procesando {source}: {str(e)}")
             
-            # Mostrar resultados
-            progress_bar.empty()
-            status_text.empty()
-            st.success(f'¡Proceso completado! Se añadieron {total_new_entries} nuevas entradas.')
-            
-        except Exception as e:
-            st.error(f'Error: {str(e)}')
-else:
-    st.info('Por favor, sube el archivo credentials.json para comenzar.')
+            # Actualizar barra de progreso
+            progress_bar.progress((idx + 1) / total_feeds)
+        
+        # Mostrar resultados
+        progress_bar.empty()
+        status_text.empty()
+        st.success(f'¡Proceso completado! Se añadieron {total_new_entries} nuevas entradas.')
+        
+    except Exception as e:
+        st.error(f'Error: {str(e)}')
 
 # Instrucciones
 with st.expander("Ver instrucciones"):
     st.markdown("""
     ### Cómo usar esta aplicación:
     
-    1. Asegúrate de tener:
-        - El archivo credentials.json de tu cuenta de servicio de Google
-        - El ID de tu hoja de Google Sheets
-        - Permisos configurados correctamente
-        
-    2. Sube el archivo credentials.json usando el selector en la barra lateral
+    1. Verifica el ID de la hoja de Google Sheets en la barra lateral
     
-    3. Verifica el ID de la hoja de Google Sheets
+    2. Selecciona las fuentes que quieres procesar
     
-    4. Selecciona las fuentes que quieres procesar
-    
-    5. Haz clic en 'Recolectar Noticias'
+    3. Haz clic en 'Recolectar Noticias'
     
     La aplicación recolectará las noticias y las añadirá a tu hoja de Google Sheets automáticamente.
     """)
