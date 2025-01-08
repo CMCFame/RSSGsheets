@@ -7,7 +7,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import json
 import hashlib
-import re
 
 # Configuración de la página
 st.set_page_config(
@@ -15,6 +14,9 @@ st.set_page_config(
     page_icon="🎮",
     layout="wide"
 )
+
+# Constantes
+MAX_ENTRIES_PER_FEED = 5  # Límite de entradas por feed
 
 # Lista de feeds
 GAMING_FEEDS = {
@@ -46,21 +48,12 @@ class URLCache:
 
     def is_new_url(self, url, source):
         url_hash = hashlib.md5(url.encode()).hexdigest()
-        
         if source not in self.cache:
             self.cache[source] = []
-            
         if url_hash not in self.cache[source]:
             self.cache[source].append(url_hash)
             return True
         return False
-
-def clean_html(text):
-    """Limpia el HTML del texto"""
-    text = re.sub(r'<img[^>]+>', '', text)
-    text = re.sub(r'<[^>]+>', '', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
 
 def extract_url(link):
     """Extracts URL from different link formats"""
@@ -75,24 +68,10 @@ def extract_url(link):
 def get_sheet_service():
     """Initialize Google Sheets API service"""
     try:
-        st.write("Verificando configuración de credenciales...")
-        
-        # Intentar acceder a los secrets para verificar que están configurados
         if "google_credentials" not in st.secrets:
             st.error("No se encontró la sección 'google_credentials' en los secrets")
             return None
-            
-        required_fields = ["project_id", "private_key_id", "private_key", 
-                          "client_email", "client_id", "client_x509_cert_url"]
-        
-        missing_fields = [field for field in required_fields 
-                         if field not in st.secrets.google_credentials]
-        
-        if missing_fields:
-            st.error(f"Faltan los siguientes campos en los secrets: {', '.join(missing_fields)}")
-            return None
 
-        # Crear el diccionario de credenciales usando los secrets
         credentials = {
             "type": "service_account",
             "project_id": st.secrets["google_credentials"]["project_id"],
@@ -106,60 +85,42 @@ def get_sheet_service():
             "client_x509_cert_url": st.secrets["google_credentials"]["client_x509_cert_url"]
         }
         
-        st.write("Credenciales configuradas correctamente")
-        
         creds = Credentials.from_service_account_info(
             credentials,
             scopes=['https://www.googleapis.com/auth/spreadsheets']
         )
-        
-        st.write("Credenciales creadas, intentando construir el servicio...")
-        
-        service = build('sheets', 'v4', credentials=creds)
-        st.write("Servicio construido exitosamente")
-        
-        return service
-        
+        return build('sheets', 'v4', credentials=creds)
     except Exception as e:
         st.error(f"Error al configurar el servicio: {str(e)}")
         return None
 
-def create_headers(service, spreadsheet_id):
-    """Create headers if they don't exist"""
+def batch_update_sheet(service, spreadsheet_id, values_to_append):
+    """Actualiza la hoja en lotes para reducir llamadas a la API"""
+    if not values_to_append:
+        return True
+        
     try:
-        # Añadir más logging para debug
-        st.write("Intentando acceder a la hoja...")
-        st.write(f"Spreadsheet ID: {spreadsheet_id}")
-        
-        result = service.spreadsheets().values().get(
+        service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
-            range='Noticias!A:E'
+            range='Noticias!A:D',
+            valueInputOption='RAW',
+            insertDataOption='INSERT_ROWS',
+            body={'values': values_to_append}
         ).execute()
-        
-        if 'values' not in result or not result['values']:
-            headers = [['Fecha', 'Fuente', 'Título', 'URL', 'Resumen']]
-            body = {'values': headers}
-            service.spreadsheets().values().update(
-                spreadsheetId=spreadsheet_id,
-                range='Noticias!A:E',
-                valueInputOption='RAW',
-                body=body
-            ).execute()
-            return True
+        time.sleep(2)  # Pausa para respetar límites de la API
+        return True
     except HttpError as e:
-        st.error(f"Error HTTP: {str(e.error_details)}")
+        st.error(f"Error al actualizar la hoja: {str(e.error_details)}")
         return False
     except Exception as e:
         st.error(f"Error inesperado: {str(e)}")
         return False
-    return True
 
 # Interfaz de Streamlit
 st.title('🎮 RSS Gaming News Collector')
 
 # Sidebar para configuración
 st.sidebar.header('Configuración')
-
 spreadsheet_id = st.sidebar.text_input('ID de Google Spreadsheet', '1yIKuqRs9KlqMdqhPEbTpfoIwMNSWaNomRVUuFOsrokU')
 
 # Selección de fuentes
@@ -174,64 +135,63 @@ if st.button('Recolectar Noticias'):
         service = get_sheet_service()
         if service is None:
             st.error('Error al inicializar el servicio de Google Sheets.')
-            st.error('Verifica que los secrets estén configurados correctamente.')
             st.stop()
-        
-        # Verificar acceso y crear headers
-        if not create_headers(service, spreadsheet_id):
-            st.error('Error al acceder a la hoja de cálculo. Verifica el ID y los permisos.')
-            st.stop()
-        
+
         # Crear barra de progreso
         progress_bar = st.progress(0)
         status_text = st.empty()
         
-        # Inicializar cache
+        # Inicializar cache y variables
         cache = URLCache()
         total_new_entries = 0
         total_feeds = len(selected_feeds)
+        batch_size = 10  # Número de entradas por lote
+        current_batch = []
         
         for idx, (source, feed_url) in enumerate(selected_feeds.items()):
             status_text.text(f"Procesando {source}...")
             try:
                 feed = feedparser.parse(feed_url)
+                entries_processed = 0  # Contador para este feed
                 
-                for entry in feed.entries:
+                # Tomar solo las primeras MAX_ENTRIES_PER_FEED entradas
+                for entry in feed.entries[:MAX_ENTRIES_PER_FEED]:
                     link = extract_url(entry.get('link', '#'))
                     if '?' in link:
                         link = link.split('?')[0]
                     
                     if cache.is_new_url(link, source):
-                        summary = clean_html(entry.get('summary', ''))
-                        if len(summary) > 300:
-                            summary = summary[:297] + "..."
-                        
-                        values = [[
+                        current_batch.append([
                             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             source,
                             entry.get('title', 'Sin título'),
-                            link,
-                            summary
-                        ]]
-                        
-                        service.spreadsheets().values().append(
-                            spreadsheetId=spreadsheet_id,
-                            range='Noticias!A:E',
-                            valueInputOption='RAW',
-                            insertDataOption='INSERT_ROWS',
-                            body={'values': values}
-                        ).execute()
-                        
+                            link
+                        ])
                         total_new_entries += 1
+                        entries_processed += 1
                         
-                        # Pequeña pausa
-                        time.sleep(0.5)
+                        # Si alcanzamos el tamaño del lote, actualizamos la hoja
+                        if len(current_batch) >= batch_size:
+                            if not batch_update_sheet(service, spreadsheet_id, current_batch):
+                                st.error("Error al actualizar el lote. Deteniendo el proceso.")
+                                st.stop()
+                            current_batch = []
+                            time.sleep(1)  # Pausa adicional entre lotes
+                
+                st.write(f"Procesadas {entries_processed} entradas nuevas de {source}")
+                time.sleep(0.5)  # Pausa entre fuentes
                 
             except Exception as e:
                 st.warning(f"Error procesando {source}: {str(e)}")
             
             # Actualizar barra de progreso
             progress_bar.progress((idx + 1) / total_feeds)
+        
+        # Actualizar cualquier entrada restante
+        if current_batch:
+            if not batch_update_sheet(service, spreadsheet_id, current_batch):
+                st.error("Error al actualizar el último lote.")
+                st.stop()
         
         # Mostrar resultados
         progress_bar.empty()
@@ -243,21 +203,18 @@ if st.button('Recolectar Noticias'):
 
 # Instrucciones
 with st.expander("Ver instrucciones"):
-    st.markdown("""
+    st.markdown(f"""
     ### Cómo usar esta aplicación:
     
     1. Verifica el ID de la hoja de Google Sheets en la barra lateral
-    
     2. Selecciona las fuentes que quieres procesar
-    
     3. Haz clic en 'Recolectar Noticias'
     
-    La aplicación recolectará las noticias y las añadirá a tu hoja de Google Sheets automáticamente.
+    La aplicación recolectará las {MAX_ENTRIES_PER_FEED} noticias más recientes de cada fuente seleccionada.
     
-    ### Solución de problemas:
-    
-    Si ves errores al acceder a la hoja:
-    1. Verifica que el ID de la hoja sea correcto
-    2. Asegúrate de que la cuenta de servicio tenga permisos de edición
-    3. Verifica que exista una pestaña llamada "Noticias" en la hoja
+    ### Columnas en la hoja:
+    - Fecha
+    - Fuente
+    - Título
+    - URL
     """)
