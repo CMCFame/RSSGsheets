@@ -39,7 +39,6 @@ GAMING_FEEDS = {
     "VGC": "https://www.videogameschronicle.com/category/news/feed/"
 }
 
-# Clases y funciones auxiliares
 @st.cache_resource
 class URLCache:
     def __init__(self):
@@ -76,17 +75,18 @@ def extract_url(link):
 def get_sheet_service():
     """Initialize Google Sheets API service"""
     try:
+        # Crear el diccionario de credenciales usando los secrets
         credentials = {
             "type": "service_account",
-            "project_id": st.secrets["project_id"],
-            "private_key_id": st.secrets["private_key_id"],
-            "private_key": st.secrets["private_key"],
-            "client_email": st.secrets["client_email"],
-            "client_id": st.secrets["client_id"],
+            "project_id": st.secrets["google_credentials"]["project_id"],
+            "private_key_id": st.secrets["google_credentials"]["private_key_id"],
+            "private_key": st.secrets["google_credentials"]["private_key"],
+            "client_email": st.secrets["google_credentials"]["client_email"],
+            "client_id": st.secrets["google_credentials"]["client_id"],
             "auth_uri": "https://accounts.google.com/o/oauth2/auth",
             "token_uri": "https://oauth2.googleapis.com/token",
             "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-            "client_x509_cert_url": st.secrets["client_x509_cert_url"]
+            "client_x509_cert_url": st.secrets["google_credentials"]["client_x509_cert_url"]
         }
         
         creds = Credentials.from_service_account_info(
@@ -139,7 +139,8 @@ if st.button('Recolectar Noticias'):
     try:
         service = get_sheet_service()
         if service is None:
-            st.error('Error al inicializar el servicio de Google Sheets')
+            st.error('Error al inicializar el servicio de Google Sheets.')
+            st.error('Verifica que los secrets estén configurados correctamente.')
             st.stop()
         
         # Verificar acceso y crear headers
