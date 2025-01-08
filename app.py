@@ -7,6 +7,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 import json
 import hashlib
+import re
 
 # Configuración de la página
 st.set_page_config(
@@ -55,6 +56,29 @@ class URLCache:
             return True
         return False
 
+def clean_html(text):
+    """Limpia el HTML del texto manteniendo el formato básico"""
+    if not text:
+        return ""
+    
+    # Reemplazar algunos elementos HTML comunes con formato legible
+    text = text.replace('</p>', '\n')
+    text = text.replace('<br>', '\n')
+    text = text.replace('<br/>', '\n')
+    text = text.replace('<br />', '\n')
+    
+    # Eliminar cualquier otro tag HTML
+    text = re.sub(r'<[^>]+>', '', text)
+    
+    # Limpiar espacios múltiples y líneas en blanco
+    text = re.sub(r'\n\s*\n', '\n\n', text)
+    text = re.sub(r' +', ' ', text)
+    
+    # Limpiar espacios al inicio y final
+    text = text.strip()
+    
+    return text
+
 def extract_url(link):
     """Extracts URL from different link formats"""
     if isinstance(link, str):
@@ -94,6 +118,23 @@ def get_sheet_service():
         st.error(f"Error al configurar el servicio: {str(e)}")
         return None
 
+def get_content_or_summary(entry):
+    """Obtiene el contenido más completo disponible del entry"""
+    # Intentar obtener el contenido completo primero
+    if 'content' in entry and entry.content:
+        content = entry.content[0].value if isinstance(entry.content, list) else entry.content
+        return clean_html(content)
+    
+    # Si no hay contenido, intentar con el resumen
+    if 'summary' in entry:
+        return clean_html(entry.get('summary', ''))
+    
+    # Si no hay resumen, intentar con la descripción
+    if 'description' in entry:
+        return clean_html(entry.get('description', ''))
+    
+    return 'No hay descripción disponible'
+
 def batch_update_sheet(service, spreadsheet_id, values_to_append):
     """Actualiza la hoja en lotes para reducir llamadas a la API"""
     if not values_to_append:
@@ -102,7 +143,7 @@ def batch_update_sheet(service, spreadsheet_id, values_to_append):
     try:
         service.spreadsheets().values().append(
             spreadsheetId=spreadsheet_id,
-            range='Noticias!A:D',
+            range='Noticias!A:E',
             valueInputOption='RAW',
             insertDataOption='INSERT_ROWS',
             body={'values': values_to_append}
@@ -161,11 +202,15 @@ if st.button('Recolectar Noticias'):
                         link = link.split('?')[0]
                     
                     if cache.is_new_url(link, source):
+                        # Obtener el contenido más completo disponible
+                        content = get_content_or_summary(entry)
+                        
                         current_batch.append([
                             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             source,
                             entry.get('title', 'Sin título'),
-                            link
+                            link,
+                            content
                         ])
                         total_new_entries += 1
                         entries_processed += 1
@@ -217,4 +262,5 @@ with st.expander("Ver instrucciones"):
     - Fuente
     - Título
     - URL
+    - Resumen/Contenido completo
     """)
